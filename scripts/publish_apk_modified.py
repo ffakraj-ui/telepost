@@ -14,7 +14,7 @@ import requests
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -109,6 +109,15 @@ def extract_version_from_filename(filename):
         return None
     m = re.search(r"v([\d.]+)", filename, re.IGNORECASE)
     return m.group(1) if m else None
+
+
+def resolve_filename(apk_url, app_name):
+    """Har jagah (discovery + download) same normalized filename banane ke liye.
+    URL-encoding (%20, %40, etc.) hamesha decode karo warna history match nahi hoga."""
+    filename = unquote(os.path.basename(apk_url.split("?")[0]))
+    if not filename.lower().endswith(".apk"):
+        filename = f"{app_name.replace(' ', '_')}.apk"
+    return filename
 
 
 # ================= FILE / HISTORY HELPERS =================
@@ -386,9 +395,7 @@ def getmodpc_download(app_url, download_dir, history):
         print_error("No download link found!")
         return None, None, None
 
-    filename = os.path.basename(apk_url.split("?")[0])
-    if not filename.endswith(".apk"):
-        filename = f"{app_name.replace(' ', '_')}.apk"
+    filename = resolve_filename(apk_url, app_name)
 
     if filename in history.get("downloaded", []):
         filepath = os.path.join(download_dir, filename)
@@ -879,7 +886,7 @@ def run_pipeline_from_sitemap_xml(xml_file, limit, account_key):
                     apk_url = None
                 if not apk_url:
                     continue
-                filename = os.path.basename(apk_url.split("?")[0])
+                filename = resolve_filename(apk_url, get_app_name(url))
                 if filename in downloaded_set or filename in processed_set:
                     continue
                 download_jobs.append({"url": url, "apk_url": apk_url, "filename": filename})
@@ -946,7 +953,7 @@ def run_pipeline(sitemap_url, limit, account_key):
                     apk_url = None
                 if not apk_url:
                     continue
-                filename = os.path.basename(apk_url.split("?")[0])
+                filename = resolve_filename(apk_url, get_app_name(url))
                 if filename in downloaded_set or filename in processed_set:
                     continue
                 download_jobs.append({"url": url, "apk_url": apk_url, "filename": filename})
