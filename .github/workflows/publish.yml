@@ -1,0 +1,93 @@
+name: Modify + Publish APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      sitemap:
+        description: "Sitemap URL (e.g. https://getmodpc.net/post-sitemap.xml)"
+        required: true
+        type: string
+      limit:
+        description: "Kitne apps process karne hain (max 30 recommended per run)"
+        required: false
+        type: string
+        default: "5"
+      account:
+        description: "Kaunse GitHub account/repo se publish karna hai"
+        required: true
+        type: choice
+        options:
+          - ffakraj
+          - mlkraj
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install radare2
+        run: sudo apt-get update -y && sudo apt-get install -y radare2
+
+      - name: Set up Android build-tools (zipalign, apksigner)
+        run: |
+          BUILD_TOOLS_DIR=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 | sort -V | tail -1)
+          echo "$BUILD_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Install Python dependencies
+        run: |
+          pip install requests beautifulsoup4 google-auth google-play-scraper lxml
+
+      - name: Restore previous state (download history / processed list)
+        run: |
+          mkdir -p pipeline_work/getmodfiles pipeline_work/published
+          [ -f state/download_history.json ] && cp state/download_history.json pipeline_work/getmodfiles/download_history.json || echo "{}" > pipeline_work/getmodfiles/download_history.json
+          [ -f state/processed.json ] && cp state/processed.json pipeline_work/published/.processed.json || echo "[]" > pipeline_work/published/.processed.json
+
+      - name: Write Firebase service account
+        run: |
+          mkdir -p pipeline_work
+          echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}' > pipeline_work/firebase-service-account.json
+
+      - name: Write keystore
+        run: |
+          echo "${{ secrets.TWMODS_KEYSTORE_BASE64 }}" | base64 -d > pipeline_work/twmodskey.jks
+
+      - name: Run pipeline
+        env:
+          CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
+          TWMODS_KEYSTORE_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
+          TWMODS_KEY_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
+        run: |
+          python scripts/publish_apk.py \
+            --sitemap "${{ inputs.sitemap }}" \
+            --limit "${{ inputs.limit }}" \
+            --account "${{ inputs.account }}"
+
+      - name: Save state back to repo
+        if: always()
+        run: |
+          mkdir -p state
+          cp pipeline_work/getmodfiles/download_history.json state/download_history.json 2>/dev/null || true
+          cp pipeline_work/published/.processed.json state/processed.json 2>/dev/null || true
+          git config --global user.name "telepost-bot"
+          git config --global user.email "actions@github.com"
+          git add state/
+          git diff --cached --quiet || git commit -m "Update pipeline state [skip ci]"
+          git push
+
+      - name: Upload logs/state as artifact
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: pipeline-state
+          path: |
+            pipeline_work/getmodfiles/download_history.json
+            pipeline_work/published/.processed.json
