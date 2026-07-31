@@ -41,7 +41,7 @@ CHANNEL_USERNAME = "@" + TELEGRAM_LINK.rstrip("/").split("/")[-1]
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-TW_LOGO_URL = "https://twmods.in/favicon.avif"
+TW_LOGO_URL = "https://twmods.in/favicon.webp"
 TW_LOGO_FALLBACK = "https://cdn-icons-png.flaticon.com/512/732/732221.png"
 
 POSTED_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "posted.json")
