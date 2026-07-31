@@ -1,13 +1,5 @@
 """
-TW Mods Publish Pipeline (GitHub Actions version)
---------------------------------------------------
-Original Termux script ka non-interactive adaptation:
-  Sitemap parse -> APK download -> .so string patch (detection bypass)
-  -> zipalign+sign -> GitHub release upload -> Firebase Realtime DB publish
-
-Koi input() nahi hai -- sab CLI args (--sitemap, --limit, --account) aur
-CONFIG_JSON / FIREBASE_SERVICE_ACCOUNT_JSON / keystore file (already written
-to disk by the workflow before this script runs) se aata hai.
+TW Mods Publish Pipeline (GitHub Actions version) - Modified for sitemap file support
 """
 
 import os
@@ -49,14 +41,14 @@ TELEGRAM_LINK = CONFIG.get("telegram_link", "https://t.me/twmodstore")
 PREFETCH_WORKERS = CONFIG.get("prefetch_workers", 8)
 PREFETCH_BATCH = CONFIG.get("prefetch_batch", 25)
 
-# Runner-local working directories (phone paths ki jagah)
+# Runner-local working directories
 WORKDIR = os.path.abspath("pipeline_work")
 INPUT_FOLDER = os.path.join(WORKDIR, "getmodfiles")
 OUTPUT_FOLDER = os.path.join(WORKDIR, "published")
 os.makedirs(INPUT_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# Service account + keystore -- workflow inhe pehle se disk pe likh chuka hoga
+# Service account + keystore
 SERVICE_ACCOUNT = os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH", os.path.join(WORKDIR, "firebase-service-account.json"))
 KEYSTORE_PATH = os.environ.get("TWMODS_KEYSTORE_PATH", os.path.join(WORKDIR, "twmodskey.jks"))
 KEYSTORE_ALIAS = os.environ.get("TWMODS_KEY_ALIAS", "twmods")
@@ -236,16 +228,71 @@ def firebase_db_delete(slug):
         return False
 
 
-# ================= SITEMAP =================
+# ================= SITEMAP PARSE (Modified) =================
+
+def parse_sitemap_from_file(sitemap_file):
+    """Parse sitemap URLs from a file"""
+    print_info(f"Reading sitemap URLs from file: {sitemap_file}")
+    try:
+        with open(sitemap_file, 'r') as f:
+            urls = [line.strip() for line in f if line.strip()]
+        
+        items = []
+        for url in urls:
+            if not url.endswith((".png", ".jpg", ".webp", ".css", ".js", ".xml")):
+                items.append((url, None))
+        
+        # Sort by lastmod if available (but we don't have it from file)
+        print_success(f"Loaded {len(items)} URLs from sitemap file")
+        return items
+    except Exception as e:
+        print_error(f"Failed to read sitemap file: {e}")
+        return []
+
 
 def parse_sitemap(sitemap_url):
+    """Original parse_sitemap function with better error handling"""
     print_info(f"Fetching sitemap: {sitemap_url}")
     try:
         resp = requests.get(sitemap_url, headers=HEADERS, timeout=30)
         resp.encoding = "utf-8"
-        root = ET.fromstring(resp.content)
-        items = []
+        
+        # Remove invalid XML characters
+        content = resp.content
+        content = re.sub(b'[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]', b'', content)
+        
+        # Try different parsing methods
+        root = None
+        
+        # Method 1: Try standard ET
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as e:
+            print_warning(f"Standard XML parse failed: {e}")
+            
+            # Method 2: Try with lxml if available
+            try:
+                from lxml import etree
+                parser = etree.XMLParser(recover=True)
+                root = etree.fromstring(content, parser=parser)
+                print_info("Parsed with lxml (recover mode)")
+            except ImportError:
+                print_warning("lxml not installed, using fallback")
+                # Method 3: Regex fallback
+                text = content.decode('utf-8', errors='ignore')
+                urls = re.findall(r'<loc>(https?://[^<]+)</loc>', text)
+                items = []
+                for url in urls:
+                    if not url.endswith((".png", ".jpg", ".webp", ".css", ".js", ".xml")):
+                        items.append((url.strip(), None))
+                return items
+            except Exception as e:
+                print_error(f"lxml parse failed: {e}")
+                return []
+        
+        # Parse with namespace
         ns = "http://www.sitemaps.org/schemas/sitemap/0.9"
+        items = []
         for url_elem in root.findall(f".//{{{ns}}}url"):
             loc = url_elem.find(f"{{{ns}}}loc")
             lastmod = url_elem.find(f"{{{ns}}}lastmod")
@@ -254,6 +301,8 @@ def parse_sitemap(sitemap_url):
                 if not url.endswith((".png", ".jpg", ".webp", ".css", ".js", ".xml")):
                     dt = safe_parse_iso_datetime(lastmod.text) if lastmod is not None else None
                     items.append((url, dt))
+        
+        # Deduplicate
         dedup = {}
         for url, dt in items:
             if url not in dedup or (dt and (dedup[url] is None or dt > dedup[url])):
@@ -760,9 +809,79 @@ def process_single_app(app_url, db_data, history, processed_set, repo, token, re
     return result
 
 
-# ================= MAIN PIPELINE (non-interactive) =================
+# ================= MAIN PIPELINE (Modified for sitemap file) =================
+
+def run_pipeline_from_file(sitemap_file, limit, account_key):
+    """Run pipeline using URLs from a file"""
+    cfg = GITHUB_CONFIGS.get(account_key)
+    if not cfg:
+        print_error(f"'{account_key}' github_configs me nahi mila!")
+        sys.exit(1)
+    repo, token, release_id = cfg["repo"], cfg["token"], cfg["release_id"]
+    print_info(f"Target: {cfg['label']}")
+
+    db_data = firebase_db_get_all() or {}
+    
+    # Read URLs from file
+    items = parse_sitemap_from_file(sitemap_file)
+    if not items:
+        print_error("Sitemap file me koi URL nahi mila!")
+        sys.exit(1)
+
+    total_available = len(items)
+    limit = min(limit, total_available)
+    print_success(f"Found {total_available} apps, processing up to {limit}")
+
+    history = load_download_history()
+    downloaded_set = set(history.get("downloaded", []))
+    processed_set = load_processed_db()
+
+    download_jobs = []
+    idx = 0
+    while len(download_jobs) < limit and idx < len(items):
+        batch = items[idx: idx + PREFETCH_BATCH]
+        idx += PREFETCH_BATCH
+        with ThreadPoolExecutor(max_workers=PREFETCH_WORKERS) as ex:
+            futures = {ex.submit(extract_apk_links, url): (url, dt) for url, dt in batch}
+            for fut in as_completed(futures):
+                url, dt = futures[fut]
+                try:
+                    apk_url = fut.result()
+                except Exception:
+                    apk_url = None
+                if not apk_url:
+                    continue
+                filename = os.path.basename(apk_url.split("?")[0])
+                if filename in downloaded_set or filename in processed_set:
+                    continue
+                download_jobs.append({"url": url, "apk_url": apk_url, "filename": filename})
+                if len(download_jobs) >= limit:
+                    break
+
+    if not download_jobs:
+        print_warning("Koi naya app nahi mila process karne ke liye!")
+        return
+
+    print_success(f"Ready: {len(download_jobs)} app(s)")
+
+    success_count, fail_count = 0, 0
+    for i, job in enumerate(download_jobs, start=1):
+        print(f"\n{'#'*60}\n[{i}/{len(download_jobs)}] {job['url']}\n{'#'*60}")
+        result = process_single_app(job["url"], db_data, history, processed_set, repo, token, release_id)
+        if result["status"] == "success":
+            success_count += 1
+            print_success(f"DONE: {job['filename']}")
+        else:
+            fail_count += 1
+            print_error(f"FAILED: {job['filename']} — {result['status']}")
+        if i < len(download_jobs):
+            time.sleep(2)
+
+    print(f"\n{BOLD}{GREEN}{'='*60}\nCOMPLETE — Success: {success_count} | Failed: {fail_count}\n{'='*60}{RESET}")
+
 
 def run_pipeline(sitemap_url, limit, account_key):
+    """Original run_pipeline function"""
     cfg = GITHUB_CONFIGS.get(account_key)
     if not cfg:
         print_error(f"'{account_key}' github_configs me nahi mila!")
@@ -830,7 +949,8 @@ def run_pipeline(sitemap_url, limit, account_key):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sitemap", required=True, help="Sitemap URL, e.g. https://getmodpc.net/post-sitemap.xml")
+    parser.add_argument("--sitemap", help="Sitemap URL, e.g. https://getmodpc.net/post-sitemap.xml")
+    parser.add_argument("--sitemap-file", help="File containing sitemap URLs (one per line)")
     parser.add_argument("--limit", type=int, default=5, help="Kitne apps process karne hain")
     parser.add_argument("--account", required=True, help="github_configs key, e.g. ffakraj ya mlkraj")
     args = parser.parse_args()
@@ -840,7 +960,13 @@ def main():
         print_error(f"Missing tools: {', '.join(missing)}")
         sys.exit(1)
 
-    run_pipeline(args.sitemap, args.limit, args.account)
+    if args.sitemap_file:
+        run_pipeline_from_file(args.sitemap_file, args.limit, args.account)
+    elif args.sitemap:
+        run_pipeline(args.sitemap, args.limit, args.account)
+    else:
+        print_error("Either --sitemap or --sitemap-file is required!")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
