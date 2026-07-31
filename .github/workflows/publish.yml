@@ -26,10 +26,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -50,67 +50,67 @@ jobs:
         run: |
           echo "📥 Downloading sitemap: ${{ inputs.sitemap }}"
           
-          # Download sitemap
           curl -s -L "${{ inputs.sitemap }}" -o /tmp/sitemap.xml
-          
-          # Check if download succeeded
-          if [ ! -s /tmp/sitemap.xml ]; then
-            echo "❌ Sitemap download failed!"
-            exit 1
-          fi
           
           echo "📏 Sitemap size: $(wc -c < /tmp/sitemap.xml) bytes"
           
-          # Validate and extract URLs using Python
+          # Extract URLs properly with namespace handling
           python3 << 'PYSCRIPT'
           import re
           import xml.etree.ElementTree as ET
-          from lxml import etree
           
-          with open('/tmp/sitemap.xml', 'rb') as f:
+          with open('/tmp/sitemap.xml', 'r', encoding='utf-8', errors='ignore') as f:
               content = f.read()
           
-          # Remove invalid XML characters
-          content = re.sub(b'[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]', b'', content)
+          print("📄 First 500 chars:")
+          print(content[:500])
+          print("\n" + "="*60)
           
           urls = []
-          try:
-              # Try lxml first with recover mode
-              parser = etree.XMLParser(recover=True)
-              root = etree.fromstring(content, parser=parser)
-              ns = "http://www.sitemaps.org/schemas/sitemap/0.9"
-              
-              for url_elem in root.findall(f".//{{{ns}}}url"):
-                  loc = url_elem.find(f"{{{ns}}}loc")
-                  if loc is not None and loc.text:
-                      url = loc.text.strip()
-                      if url.endswith(('.apk', '/')) or 'getmodpc.net' in url:
-                          if not url.endswith(('.png', '.jpg', '.webp', '.css', '.js', '.xml')):
-                              urls.append(url)
-                              
-          except Exception as e:
-              print(f"⚠️ lxml failed: {e}")
-              # Fallback: regex extraction
-              urls = re.findall(r'<loc>(https?://[^<]+)</loc>', content.decode('utf-8', errors='ignore'))
-              urls = [u for u in urls if 'getmodpc.net' in u and not u.endswith(('.png', '.jpg', '.webp', '.css', '.js', '.xml'))]
           
-          # Save URLs to file
+          # Method 1: Parse with namespace
+          try:
+              # Register namespace
+              ET.register_namespace('', 'http://www.sitemaps.org/schemas/sitemap/0.9')
+              ET.register_namespace('image', 'http://www.google.com/schemas/sitemap-image/1.1')
+              
+              root = ET.fromstring(content)
+              # Find all loc elements regardless of namespace
+              for loc in root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}loc'):
+                  if loc.text and 'getmodpc.net' in loc.text:
+                      url = loc.text.strip()
+                      # Skip non-post URLs
+                      if not url.endswith(('.xml', '.png', '.jpg', '.webp', '.css', '.js')):
+                          urls.append(url)
+                          print(f"✅ Found: {url}")
+          except Exception as e:
+              print(f"⚠️ XML parse failed: {e}")
+          
+          # Method 2: Regex fallback if no URLs found
+          if not urls:
+              print("🔄 Using regex fallback...")
+              # Find all post URLs
+              urls = re.findall(r'<loc>(https?://getmodpc\.net/[^<]+)</loc>', content)
+              # Filter out non-post URLs
+              urls = [u for u in urls if not u.endswith(('.xml', '.png', '.jpg', '.webp', '.css', '.js'))]
+              # Remove duplicates
+              urls = list(dict.fromkeys(urls))
+          
+          # Save URLs
           with open('/tmp/sitemap_urls.txt', 'w') as f:
               for url in urls:
                   f.write(url + '\n')
           
-          print(f"✅ Extracted {len(urls)} URLs from sitemap")
+          print(f"\n✅ Extracted {len(urls)} URLs from sitemap")
           print(f"📝 First 5 URLs:")
           for url in urls[:5]:
               print(f"  • {url}")
           
-          # Save count for later
           with open('/tmp/url_count.txt', 'w') as f:
               f.write(str(len(urls)))
           PYSCRIPT
-          
+
           echo "URL_COUNT=$(cat /tmp/url_count.txt)" >> "$GITHUB_OUTPUT"
-          echo "SITEMAP_URLS_FILE=/tmp/sitemap_urls.txt" >> "$GITHUB_OUTPUT"
 
       - name: Restore previous state (download history / processed list)
         run: |
@@ -170,7 +170,7 @@ jobs:
 
       - name: Upload logs/state as artifact
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: pipeline-state
           path: |
