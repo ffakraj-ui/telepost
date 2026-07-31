@@ -22,6 +22,7 @@ import requests
 from pyrogram import Client, enums
 from pyaxmlparser import APK
 from PIL import Image, ImageDraw, ImageFont
+import pillow_avif  # noqa: F401  -- registers AVIF decoder with Pillow
 
 # ================= CONFIG LOAD (CONFIG_JSON secret se) =================
 
@@ -251,8 +252,10 @@ def cover_resize(img, size):
 
 def load_font(size, bold=True):
     candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf" if bold else "/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf",
+        "/usr/share/fonts/truetype/roboto/hinted/Roboto-Bold.ttf" if bold else "/usr/share/fonts/truetype/roboto/hinted/Roboto-Regular.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -370,7 +373,7 @@ def process_asset(app_client, repo, token, asset, posted, dry_run=False):
 
 🤖 <b>Mod Info</b>: <i>{safe_mod_info}</i>
 
-<blockquote expandable>
+<blockquote>
 {feature_text}
 </blockquote>
 📢 <a href="{TELEGRAM_LINK}">Telegram</a> 💬 <a href="https://t.me/twmodschat">Discuss</a> 👑 <a href="https://www.instagram.com/tw_mods/">Instagram</a>"""
