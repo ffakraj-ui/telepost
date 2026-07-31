@@ -354,7 +354,7 @@ def parse_sitemap(sitemap_url):
 
 # ================= DOWNLOAD =================
 
-def extract_apk_links(page_url):
+def extract_apk_links(page_url, debug=False):
     if not page_url.endswith("/?download=links"):
         page_url = page_url.rstrip("/") + "/?download=links"
     try:
@@ -362,6 +362,15 @@ def extract_apk_links(page_url):
         soup = BeautifulSoup(resp.text, "html.parser")
         links = soup.select("#list-downloadlinks li a")
         urls = [a.get("href") for a in links if a.get("href")]
+        if not urls and debug:
+            print_warning(
+                f"[DEBUG] No links found | status={resp.status_code} "
+                f"| body_len={len(resp.text)} | url={page_url}"
+            )
+            title = soup.title.get_text(strip=True) if soup.title else "(no title)"
+            print_warning(f"[DEBUG] Page title: {title}")
+            has_container = soup.select_one("#list-downloadlinks") is not None
+            print_warning(f"[DEBUG] #list-downloadlinks element present: {has_container}")
         return urls[0] if urls else None
     except Exception as e:
         print_error(f"Error extracting links: {e}")
@@ -872,12 +881,15 @@ def run_pipeline_from_sitemap_xml(xml_file, limit, account_key):
     processed_set = load_processed_db()
 
     download_jobs = []
+    no_link_count = 0
+    already_seen_count = 0
+    debug_budget = [5]  # sirf pehle 5 "no link" cases print karo, log flood na ho
     idx = 0
     while len(download_jobs) < limit and idx < len(items):
         batch = items[idx: idx + PREFETCH_BATCH]
         idx += PREFETCH_BATCH
         with ThreadPoolExecutor(max_workers=PREFETCH_WORKERS) as ex:
-            futures = {ex.submit(extract_apk_links, url): (url, dt) for url, dt in batch}
+            futures = {ex.submit(extract_apk_links, url, debug_budget[0] > 0): (url, dt) for url, dt in batch}
             for fut in as_completed(futures):
                 url, dt = futures[fut]
                 try:
@@ -885,13 +897,21 @@ def run_pipeline_from_sitemap_xml(xml_file, limit, account_key):
                 except Exception:
                     apk_url = None
                 if not apk_url:
+                    no_link_count += 1
+                    debug_budget[0] = max(0, debug_budget[0] - 1)
                     continue
                 filename = resolve_filename(apk_url, get_app_name(url))
                 if filename in downloaded_set or filename in processed_set:
+                    already_seen_count += 1
                     continue
                 download_jobs.append({"url": url, "apk_url": apk_url, "filename": filename})
                 if len(download_jobs) >= limit:
                     break
+
+    print_info(
+        f"[DEBUG] no_download_link_found={no_link_count} | "
+        f"already_in_history={already_seen_count} | new_jobs={len(download_jobs)}"
+    )
 
     if not download_jobs:
         print_warning("Koi naya app nahi mila process karne ke liye!")
