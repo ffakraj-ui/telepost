@@ -11,6 +11,7 @@ import zipfile
 import shutil
 import tempfile
 import requests
+import cloudscraper
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -62,6 +63,15 @@ PROCESSED_DB = os.path.join(OUTPUT_FOLDER, ".processed.json")
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
+
+# getmodpc.net Cloudflare ke peeche hai aur GitHub Actions ke datacenter IP ko
+# "Just a moment..." JS challenge dikha ke 403 deta hai. Plain `requests` ye
+# challenge solve nahi kar sakti, isliye getmodpc.net ke saare requests ke liye
+# cloudscraper session use karo (normal requests.Session jaisa hi, bas
+# Cloudflare challenge khud solve kar leta hai).
+CF_SCRAPER = cloudscraper.create_scraper(
+    browser={"browser": "chrome", "platform": "windows", "mobile": False}
+)
 
 GREEN, RED, YELLOW, BLUE, CYAN, BOLD, RESET = (
     "\033[92m", "\033[91m", "\033[93m", "\033[94m", "\033[96m", "\033[1m", "\033[0m"
@@ -358,7 +368,7 @@ def extract_apk_links(page_url, debug=False):
     if not page_url.endswith("/?download=links"):
         page_url = page_url.rstrip("/") + "/?download=links"
     try:
-        resp = requests.get(page_url, headers=HEADERS, timeout=30)
+        resp = CF_SCRAPER.get(page_url, headers=HEADERS, timeout=30)
         soup = BeautifulSoup(resp.text, "html.parser")
         links = soup.select("#list-downloadlinks li a")
         urls = [a.get("href") for a in links if a.get("href")]
@@ -379,7 +389,7 @@ def extract_apk_links(page_url, debug=False):
 
 def download_file(url, filename, download_dir):
     try:
-        resp = requests.get(url, headers=HEADERS, stream=True, timeout=300)
+        resp = CF_SCRAPER.get(url, headers=HEADERS, stream=True, timeout=300)
         total = int(resp.headers.get("content-length", 0))
         if total > 600 * 1024 * 1024:
             print_warning(f"Skipped — {format_size(total)} exceeds 600MB")
@@ -605,8 +615,7 @@ def extract_playstore_from_html(html_text):
 
 def fetch_playstore_info(page_url):
     try:
-        resp = requests.get(page_url, headers=HEADERS, timeout=30)
-        html_text = unescape(resp.text)
+        resp = CF_SCRAPER.get(page_url, headers=HEADERS, timeout=30)
         pkg = extract_playstore_from_html(html_text)
         if pkg:
             return {"play_url": f"https://play.google.com/store/apps/details?id={pkg}", "package_id": pkg}
@@ -802,7 +811,7 @@ def process_single_app(app_url, db_data, history, processed_set, repo, token, re
     if not playstore_id:
         try:
             page_url = app_url.rstrip("/") + "/?download=links"
-            resp = requests.get(page_url, headers=HEADERS, timeout=30)
+            resp = CF_SCRAPER.get(page_url, headers=HEADERS, timeout=30)
             playstore_id = extract_playstore_from_html(resp.text)
         except Exception:
             pass
