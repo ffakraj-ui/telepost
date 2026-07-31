@@ -39,7 +39,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install requests beautifulsoup4 google-auth google-play-scraper lxml
+          pip install requests beautifulsoup4 google-auth google-play-scraper lxml cloudscraper
 
       - name: Check sitemap XML file
         id: sitemap
