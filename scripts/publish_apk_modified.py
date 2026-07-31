@@ -1,5 +1,5 @@
 """
-TW Mods Publish Pipeline (GitHub Actions version) - Modified for sitemap file support
+TW Mods Publish Pipeline (GitHub Actions version) - Modified for local sitemap XML
 """
 
 import os
@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from html import unescape
 
 # ══════════════════════════════════════════════
-#  CONFIG (CONFIG_JSON secret se, jaisa telepost me hai)
+#  CONFIG (CONFIG_JSON secret se)
 # ══════════════════════════════════════════════
 
 CONFIG_RAW = os.environ.get("CONFIG_JSON")
@@ -228,49 +228,80 @@ def firebase_db_delete(slug):
         return False
 
 
-# ================= SITEMAP PARSE (Modified) =================
+# ================= SITEMAP PARSE FROM LOCAL XML =================
 
-def parse_sitemap_from_file(sitemap_file):
-    """Parse sitemap URLs from a file"""
-    print_info(f"Reading sitemap URLs from file: {sitemap_file}")
+def parse_sitemap_from_local_xml(xml_file):
+    """Parse sitemap URLs from local XML file"""
+    print_info(f"Reading sitemap from local XML: {xml_file}")
+    
+    if not os.path.exists(xml_file):
+        print_error(f"File not found: {xml_file}")
+        return []
+    
     try:
-        with open(sitemap_file, 'r') as f:
-            urls = [line.strip() for line in f if line.strip()]
+        with open(xml_file, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
         
-        items = []
-        for url in urls:
-            if not url.endswith((".png", ".jpg", ".webp", ".css", ".js", ".xml")):
-                items.append((url, None))
+        print_info(f"File size: {len(content)} bytes")
         
-        # Sort by lastmod if available (but we don't have it from file)
-        print_success(f"Loaded {len(items)} URLs from sitemap file")
-        return items
+        # Remove invalid XML characters
+        content = re.sub(r'[^\x09\x0A\x0D\x20-\xD7FF\xE000-\xFFFD\x10000-x10FFFF]', '', content)
+        
+        urls = []
+        
+        # Method 1: Try XML parsing with namespace
+        try:
+            # Register namespace
+            ET.register_namespace('', 'http://www.sitemaps.org/schemas/sitemap/0.9')
+            ET.register_namespace('image', 'http://www.google.com/schemas/sitemap-image/1.1')
+            
+            root = ET.fromstring(content)
+            
+            # Find all loc elements
+            for loc in root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}loc'):
+                if loc.text and 'getmodpc.net' in loc.text:
+                    url = loc.text.strip()
+                    # Skip non-post URLs
+                    if not url.endswith(('.xml', '.png', '.jpg', '.jpeg', '.webp', '.css', '.js')):
+                        urls.append(url)
+                        
+        except Exception as e:
+            print_warning(f"XML parse failed: {e}")
+            
+            # Method 2: Regex fallback
+            print_info("Using regex fallback...")
+            urls = re.findall(r'<loc>(https?://getmodpc\.net/[^<]+)</loc>', content)
+            # Filter out non-post URLs
+            urls = [u for u in urls if not u.endswith(('.xml', '.png', '.jpg', '.jpeg', '.webp', '.css', '.js'))]
+            # Remove duplicates
+            urls = list(dict.fromkeys(urls))
+        
+        # Remove home page URL
+        urls = [u for u in urls if u != 'https://getmodpc.net/']
+        
+        print_success(f"Extracted {len(urls)} URLs from sitemap XML")
+        return [(url, None) for url in urls]  # Return in same format as sitemap parser
+        
     except Exception as e:
-        print_error(f"Failed to read sitemap file: {e}")
+        print_error(f"Failed to parse sitemap: {e}")
         return []
 
 
 def parse_sitemap(sitemap_url):
-    """Original parse_sitemap function with better error handling"""
+    """Original parse_sitemap function - kept for backward compatibility"""
     print_info(f"Fetching sitemap: {sitemap_url}")
     try:
         resp = requests.get(sitemap_url, headers=HEADERS, timeout=30)
         resp.encoding = "utf-8"
         
-        # Remove invalid XML characters
         content = resp.content
         content = re.sub(b'[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]', b'', content)
         
-        # Try different parsing methods
         root = None
-        
-        # Method 1: Try standard ET
         try:
             root = ET.fromstring(content)
         except ET.ParseError as e:
             print_warning(f"Standard XML parse failed: {e}")
-            
-            # Method 2: Try with lxml if available
             try:
                 from lxml import etree
                 parser = etree.XMLParser(recover=True)
@@ -278,7 +309,6 @@ def parse_sitemap(sitemap_url):
                 print_info("Parsed with lxml (recover mode)")
             except ImportError:
                 print_warning("lxml not installed, using fallback")
-                # Method 3: Regex fallback
                 text = content.decode('utf-8', errors='ignore')
                 urls = re.findall(r'<loc>(https?://[^<]+)</loc>', text)
                 items = []
@@ -290,7 +320,6 @@ def parse_sitemap(sitemap_url):
                 print_error(f"lxml parse failed: {e}")
                 return []
         
-        # Parse with namespace
         ns = "http://www.sitemaps.org/schemas/sitemap/0.9"
         items = []
         for url_elem in root.findall(f".//{{{ns}}}url"):
@@ -302,7 +331,6 @@ def parse_sitemap(sitemap_url):
                     dt = safe_parse_iso_datetime(lastmod.text) if lastmod is not None else None
                     items.append((url, dt))
         
-        # Deduplicate
         dedup = {}
         for url, dt in items:
             if url not in dedup or (dt and (dedup[url] is None or dt > dedup[url])):
@@ -809,10 +837,10 @@ def process_single_app(app_url, db_data, history, processed_set, repo, token, re
     return result
 
 
-# ================= MAIN PIPELINE (Modified for sitemap file) =================
+# ================= MAIN PIPELINE (Modified for local XML) =================
 
-def run_pipeline_from_file(sitemap_file, limit, account_key):
-    """Run pipeline using URLs from a file"""
+def run_pipeline_from_sitemap_xml(xml_file, limit, account_key):
+    """Run pipeline using local sitemap XML file"""
     cfg = GITHUB_CONFIGS.get(account_key)
     if not cfg:
         print_error(f"'{account_key}' github_configs me nahi mila!")
@@ -822,10 +850,10 @@ def run_pipeline_from_file(sitemap_file, limit, account_key):
 
     db_data = firebase_db_get_all() or {}
     
-    # Read URLs from file
-    items = parse_sitemap_from_file(sitemap_file)
+    # Parse sitemap from local XML
+    items = parse_sitemap_from_local_xml(xml_file)
     if not items:
-        print_error("Sitemap file me koi URL nahi mila!")
+        print_error("Sitemap XML me koi URL nahi mila!")
         sys.exit(1)
 
     total_available = len(items)
@@ -881,7 +909,7 @@ def run_pipeline_from_file(sitemap_file, limit, account_key):
 
 
 def run_pipeline(sitemap_url, limit, account_key):
-    """Original run_pipeline function"""
+    """Original run_pipeline function - kept for backward compatibility"""
     cfg = GITHUB_CONFIGS.get(account_key)
     if not cfg:
         print_error(f"'{account_key}' github_configs me nahi mila!")
@@ -947,12 +975,14 @@ def run_pipeline(sitemap_url, limit, account_key):
     print(f"\n{BOLD}{GREEN}{'='*60}\nCOMPLETE — Success: {success_count} | Failed: {fail_count}\n{'='*60}{RESET}")
 
 
+# ================= MAIN =================
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sitemap", help="Sitemap URL, e.g. https://getmodpc.net/post-sitemap.xml")
-    parser.add_argument("--sitemap-file", help="File containing sitemap URLs (one per line)")
+    parser.add_argument("--sitemap", help="Sitemap URL (for remote fetch)")
+    parser.add_argument("--sitemap-xml", help="Local sitemap XML file path")
     parser.add_argument("--limit", type=int, default=5, help="Kitne apps process karne hain")
-    parser.add_argument("--account", required=True, help="github_configs key, e.g. ffakraj ya mlkraj")
+    parser.add_argument("--account", required=True, help="github_configs key")
     args = parser.parse_args()
 
     missing = [cmd for cmd in ["r2", "zipalign", "apksigner"] if not shutil.which(cmd)]
@@ -960,12 +990,17 @@ def main():
         print_error(f"Missing tools: {', '.join(missing)}")
         sys.exit(1)
 
-    if args.sitemap_file:
-        run_pipeline_from_file(args.sitemap_file, args.limit, args.account)
+    if args.sitemap_xml:
+        # Use local XML file
+        if not os.path.exists(args.sitemap_xml):
+            print_error(f"Sitemap XML file not found: {args.sitemap_xml}")
+            sys.exit(1)
+        run_pipeline_from_sitemap_xml(args.sitemap_xml, args.limit, args.account)
     elif args.sitemap:
+        # Use remote URL
         run_pipeline(args.sitemap, args.limit, args.account)
     else:
-        print_error("Either --sitemap or --sitemap-file is required!")
+        print_error("Either --sitemap or --sitemap-xml is required!")
         sys.exit(1)
 
 
