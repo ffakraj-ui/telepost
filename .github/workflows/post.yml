@@ -20,6 +20,11 @@ on:
         description: "Specific APK filename (optional, khaali = pehla APK)"
         required: false
         type: string
+      limit:
+        description: "Ek run me max kitne APK bhejne hain (default 10, max 50)"
+        required: false
+        type: string
+        default: "10"
       dry_run:
         description: "Dry run (post nahi karega, sirf preview)"
         required: false
@@ -59,6 +64,9 @@ jobs:
           if [ -n "${{ inputs.release_id }}" ]; then ARGS="$ARGS --release-id ${{ inputs.release_id }}"; fi
           if [ -n "${{ inputs.release_tag }}" ]; then ARGS="$ARGS --release-tag ${{ inputs.release_tag }}"; fi
           if [ -n "${{ inputs.asset_name }}" ]; then ARGS="$ARGS --asset-name \"${{ inputs.asset_name }}\""; fi
+          LIMIT="${{ inputs.limit }}"
+          if [ -z "$LIMIT" ]; then LIMIT="10"; fi
+          ARGS="$ARGS --limit $LIMIT"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           eval python scripts/post_apk.py $ARGS
 

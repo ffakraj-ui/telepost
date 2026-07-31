@@ -15,6 +15,7 @@ import io
 import json
 import html
 import argparse
+import time
 import zipfile
 import tempfile
 import requests
@@ -430,7 +431,11 @@ def main():
     parser.add_argument("--release-tag", help="Specific release tag, e.g. v1.0 (manual mode)")
     parser.add_argument("--asset-name", help="Specific asset filename inside the release (optional)")
     parser.add_argument("--dry-run", action="store_true", help="Don't actually post, just preview")
+    parser.add_argument("--limit", type=int, default=10, help="Max APKs to process this run (capped at 50)")
     args = parser.parse_args()
+
+    limit = max(1, min(args.limit, 50))
+    processed_count = 0
 
     posted = load_posted()
 
@@ -466,8 +471,14 @@ def main():
                 sys.exit(1)
 
             for asset in assets:
+                if processed_count >= limit:
+                    print(f"\n[LIMIT] {limit} APK ka limit pura ho gaya, ruk raha hoon.")
+                    break
                 if process_asset(app_client, args.repo, token, asset, posted, args.dry_run):
                     any_posted = True
+                    processed_count += 1
+                    if not args.dry_run:
+                        time.sleep(3)
 
         else:
             # ---- AUTOMATIC MODE: saare configured repos ki latest release check karo ----
@@ -483,8 +494,16 @@ def main():
 
                 assets = pick_apk_assets(release)
                 for asset in assets:
+                    if processed_count >= limit:
+                        break
                     if process_asset(app_client, repo, token, asset, posted, args.dry_run):
                         any_posted = True
+                        processed_count += 1
+                        if not args.dry_run:
+                            time.sleep(3)
+                if processed_count >= limit:
+                    print(f"\n[LIMIT] {limit} APK ka limit pura ho gaya, ruk raha hoon.")
+                    break
 
     print("\n🎉 Done!" if any_posted else "\nℹ️  Koi naya APK nahi mila post karne ke liye.")
 
