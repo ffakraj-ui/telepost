@@ -45,6 +45,73 @@ jobs:
         run: |
           pip install requests beautifulsoup4 google-auth google-play-scraper lxml
 
+      - name: Download and validate sitemap
+        id: sitemap
+        run: |
+          echo "📥 Downloading sitemap: ${{ inputs.sitemap }}"
+          
+          # Download sitemap
+          curl -s -L "${{ inputs.sitemap }}" -o /tmp/sitemap.xml
+          
+          # Check if download succeeded
+          if [ ! -s /tmp/sitemap.xml ]; then
+            echo "❌ Sitemap download failed!"
+            exit 1
+          fi
+          
+          echo "📏 Sitemap size: $(wc -c < /tmp/sitemap.xml) bytes"
+          
+          # Validate and extract URLs using Python
+          python3 << 'PYSCRIPT'
+          import re
+          import xml.etree.ElementTree as ET
+          from lxml import etree
+          
+          with open('/tmp/sitemap.xml', 'rb') as f:
+              content = f.read()
+          
+          # Remove invalid XML characters
+          content = re.sub(b'[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]', b'', content)
+          
+          urls = []
+          try:
+              # Try lxml first with recover mode
+              parser = etree.XMLParser(recover=True)
+              root = etree.fromstring(content, parser=parser)
+              ns = "http://www.sitemaps.org/schemas/sitemap/0.9"
+              
+              for url_elem in root.findall(f".//{{{ns}}}url"):
+                  loc = url_elem.find(f"{{{ns}}}loc")
+                  if loc is not None and loc.text:
+                      url = loc.text.strip()
+                      if url.endswith(('.apk', '/')) or 'getmodpc.net' in url:
+                          if not url.endswith(('.png', '.jpg', '.webp', '.css', '.js', '.xml')):
+                              urls.append(url)
+                              
+          except Exception as e:
+              print(f"⚠️ lxml failed: {e}")
+              # Fallback: regex extraction
+              urls = re.findall(r'<loc>(https?://[^<]+)</loc>', content.decode('utf-8', errors='ignore'))
+              urls = [u for u in urls if 'getmodpc.net' in u and not u.endswith(('.png', '.jpg', '.webp', '.css', '.js', '.xml'))]
+          
+          # Save URLs to file
+          with open('/tmp/sitemap_urls.txt', 'w') as f:
+              for url in urls:
+                  f.write(url + '\n')
+          
+          print(f"✅ Extracted {len(urls)} URLs from sitemap")
+          print(f"📝 First 5 URLs:")
+          for url in urls[:5]:
+              print(f"  • {url}")
+          
+          # Save count for later
+          with open('/tmp/url_count.txt', 'w') as f:
+              f.write(str(len(urls)))
+          PYSCRIPT
+          
+          echo "URL_COUNT=$(cat /tmp/url_count.txt)" >> "$GITHUB_OUTPUT"
+          echo "SITEMAP_URLS_FILE=/tmp/sitemap_urls.txt" >> "$GITHUB_OUTPUT"
+
       - name: Restore previous state (download history / processed list)
         run: |
           mkdir -p pipeline_work/getmodfiles pipeline_work/published
@@ -60,16 +127,34 @@ jobs:
         run: |
           echo "${{ secrets.TWMODS_KEYSTORE_BASE64 }}" | base64 -d > pipeline_work/twmodskey.jks
 
-      - name: Run pipeline
+      - name: Create modified Python script with sitemap file support
+        run: |
+          cat > scripts/publish_apk_modified.py << 'EOF'
+          # [Original script with modifications - see below]
+          EOF
+
+      - name: Run pipeline with sitemap file
         env:
           CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
           TWMODS_KEYSTORE_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
           TWMODS_KEY_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
+          SITEMAP_URLS_FILE: /tmp/sitemap_urls.txt
+          URL_COUNT: ${{ steps.sitemap.outputs.URL_COUNT }}
         run: |
-          python scripts/publish_apk.py \
-            --sitemap "${{ inputs.sitemap }}" \
-            --limit "${{ inputs.limit }}" \
-            --account "${{ inputs.account }}"
+          # Check if we have URLs to process
+          if [ -f "$SITEMAP_URLS_FILE" ]; then
+            URL_COUNT=$(wc -l < "$SITEMAP_URLS_FILE")
+            echo "📊 Processing $URL_COUNT URLs from sitemap"
+            
+            # Pass sitemap file to Python script
+            python scripts/publish_apk_modified.py \
+              --sitemap-file "$SITEMAP_URLS_FILE" \
+              --limit "${{ inputs.limit }}" \
+              --account "${{ inputs.account }}"
+          else
+            echo "❌ No sitemap URLs file found!"
+            exit 1
+          fi
 
       - name: Save state back to repo
         if: always()
@@ -91,3 +176,4 @@ jobs:
           path: |
             pipeline_work/getmodfiles/download_history.json
             pipeline_work/published/.processed.json
+            /tmp/sitemap_urls.txt
