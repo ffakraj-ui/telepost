@@ -1,5 +1,5 @@
 pyrogram==2.0.106
 tgcrypto==1.2.5
-pyaxmlparser==0.3.34
+pyaxmlparser==0.3.31
 Pillow==11.1.0
 requests==2.32.3
