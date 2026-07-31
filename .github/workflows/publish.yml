@@ -39,83 +39,22 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install requests beautifulsoup4 google-auth google-play-scraper lxml cloudscraper
+          pip install requests beautifulsoup4 google-auth google-play-scraper lxml
 
-      - name: Parse sitemap from local XML file
+      - name: Check sitemap XML file
         id: sitemap
         run: |
-          echo "📄 Using local sitemap.xml file from state/"
+          echo "📄 Checking for sitemap.xml in state/"
           
-          # Check if sitemap.xml exists
           if [ ! -f "state/sitemap.xml" ]; then
             echo "❌ state/sitemap.xml not found!"
-            echo "URL_COUNT=0" >> "$GITHUB_OUTPUT"
+            echo "url_count=0" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           
           echo "📏 Sitemap file size: $(wc -c < state/sitemap.xml) bytes"
-          
-          # Parse XML and extract URLs
-          python3 << 'PYSCRIPT'
-          import re
-          import xml.etree.ElementTree as ET
-          
-          with open('state/sitemap.xml', 'r', encoding='utf-8', errors='ignore') as f:
-              content = f.read()
-          
-          # Remove invalid XML characters
-          content = re.sub(r'[^\x09\x0A\x0D\x20-\xD7FF\xE000-\xFFFD\x10000-x10FFFF]', '', content)
-          
-          urls = []
-          
-          # Method 1: Try XML parsing with namespace
-          try:
-              # Register namespace
-              ET.register_namespace('', 'http://www.sitemaps.org/schemas/sitemap/0.9')
-              ET.register_namespace('image', 'http://www.google.com/schemas/sitemap-image/1.1')
-              
-              root = ET.fromstring(content)
-              
-              # Find all loc elements
-              for loc in root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}loc'):
-                  if loc.text and 'getmodpc.net' in loc.text:
-                      url = loc.text.strip()
-                      # Skip non-post URLs
-                      if not url.endswith(('.xml', '.png', '.jpg', '.jpeg', '.webp', '.css', '.js')):
-                          urls.append(url)
-                          
-          except Exception as e:
-              print(f"⚠️ XML parse failed: {e}")
-              
-              # Method 2: Regex fallback
-              print("🔄 Using regex fallback...")
-              urls = re.findall(r'<loc>(https?://getmodpc\.net/[^<]+)</loc>', content)
-              # Filter out non-post URLs
-              urls = [u for u in urls if not u.endswith(('.xml', '.png', '.jpg', '.jpeg', '.webp', '.css', '.js'))]
-              # Remove duplicates
-              urls = list(dict.fromkeys(urls))
-          
-          # Remove home page URL
-          urls = [u for u in urls if u != 'https://getmodpc.net/']
-          
-          # Save URLs
-          with open('/tmp/sitemap_urls.txt', 'w') as f:
-              for url in urls:
-                  f.write(url + '\n')
-          
-          print(f"\n✅ Extracted {len(urls)} URLs from sitemap")
-          print(f"📝 First 5 URLs:")
-          for url in urls[:5]:
-              print(f"  • {url}")
-          
-          with open('/tmp/url_count.txt', 'w') as f:
-              f.write(str(len(urls)))
-          PYSCRIPT
-          
-          echo "URL_COUNT=$(cat /tmp/url_count.txt)" >> "$GITHUB_OUTPUT"
-          
-          # Show count
-          echo "📊 Total URLs: ${{ steps.sitemap.outputs.URL_COUNT }}"
+          echo "✅ Sitemap XML found!"
+          echo "url_count=1" >> "$GITHUB_OUTPUT"
 
       - name: Restore previous state (download history / processed list)
         run: |
@@ -132,24 +71,21 @@ jobs:
         run: |
           echo "${{ secrets.TWMODS_KEYSTORE_BASE64 }}" | base64 -d > pipeline_work/twmodskey.jks
 
-      - name: Run pipeline with sitemap file
+      - name: Run pipeline with local sitemap XML
         env:
           CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
           TWMODS_KEYSTORE_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
           TWMODS_KEY_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
         run: |
-          if [ -f "/tmp/sitemap_urls.txt" ] && [ -s "/tmp/sitemap_urls.txt" ]; then
-            URL_COUNT=$(wc -l < /tmp/sitemap_urls.txt)
-            echo "📊 Processing $URL_COUNT URLs from sitemap"
-            echo "📝 First few URLs:"
-            head -3 /tmp/sitemap_urls.txt
+          if [ -f "state/sitemap.xml" ]; then
+            echo "📊 Processing sitemap from state/sitemap.xml"
             
             python scripts/publish_apk_modified.py \
-              --sitemap-file /tmp/sitemap_urls.txt \
+              --sitemap-xml state/sitemap.xml \
               --limit "${{ inputs.limit }}" \
               --account "${{ inputs.account }}"
           else
-            echo "❌ No sitemap URLs found!"
+            echo "❌ state/sitemap.xml not found!"
             exit 1
           fi
 
@@ -173,4 +109,3 @@ jobs:
           path: |
             pipeline_work/getmodfiles/download_history.json
             pipeline_work/published/.processed.json
-            /tmp/sitemap_urls.txt
