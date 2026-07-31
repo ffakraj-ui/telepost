@@ -3,10 +3,6 @@ name: Modify + Publish APK
 on:
   workflow_dispatch:
     inputs:
-      sitemap:
-        description: "Sitemap URL (e.g. https://getmodpc.net/post-sitemap.xml)"
-        required: true
-        type: string
       limit:
         description: "Kitne apps process karne hain (max 30 recommended per run)"
         required: false
@@ -26,10 +22,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -43,58 +39,64 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install requests beautifulsoup4 google-auth google-play-scraper lxml
+          pip install requests beautifulsoup4 google-auth google-play-scraper lxml cloudscraper
 
-      - name: Download and validate sitemap
+      - name: Parse sitemap from local XML file
         id: sitemap
         run: |
-          echo "📥 Downloading sitemap: ${{ inputs.sitemap }}"
+          echo "📄 Using local sitemap.xml file from state/"
           
-          curl -s -L "${{ inputs.sitemap }}" -o /tmp/sitemap.xml
+          # Check if sitemap.xml exists
+          if [ ! -f "state/sitemap.xml" ]; then
+            echo "❌ state/sitemap.xml not found!"
+            echo "URL_COUNT=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           
-          echo "📏 Sitemap size: $(wc -c < /tmp/sitemap.xml) bytes"
+          echo "📏 Sitemap file size: $(wc -c < state/sitemap.xml) bytes"
           
-          # Extract URLs properly with namespace handling
+          # Parse XML and extract URLs
           python3 << 'PYSCRIPT'
           import re
           import xml.etree.ElementTree as ET
           
-          with open('/tmp/sitemap.xml', 'r', encoding='utf-8', errors='ignore') as f:
+          with open('state/sitemap.xml', 'r', encoding='utf-8', errors='ignore') as f:
               content = f.read()
           
-          print("📄 First 500 chars:")
-          print(content[:500])
-          print("\n" + "="*60)
+          # Remove invalid XML characters
+          content = re.sub(r'[^\x09\x0A\x0D\x20-\xD7FF\xE000-\xFFFD\x10000-x10FFFF]', '', content)
           
           urls = []
           
-          # Method 1: Parse with namespace
+          # Method 1: Try XML parsing with namespace
           try:
               # Register namespace
               ET.register_namespace('', 'http://www.sitemaps.org/schemas/sitemap/0.9')
               ET.register_namespace('image', 'http://www.google.com/schemas/sitemap-image/1.1')
               
               root = ET.fromstring(content)
-              # Find all loc elements regardless of namespace
+              
+              # Find all loc elements
               for loc in root.findall('.//{http://www.sitemaps.org/schemas/sitemap/0.9}loc'):
                   if loc.text and 'getmodpc.net' in loc.text:
                       url = loc.text.strip()
                       # Skip non-post URLs
-                      if not url.endswith(('.xml', '.png', '.jpg', '.webp', '.css', '.js')):
+                      if not url.endswith(('.xml', '.png', '.jpg', '.jpeg', '.webp', '.css', '.js')):
                           urls.append(url)
-                          print(f"✅ Found: {url}")
+                          
           except Exception as e:
               print(f"⚠️ XML parse failed: {e}")
-          
-          # Method 2: Regex fallback if no URLs found
-          if not urls:
+              
+              # Method 2: Regex fallback
               print("🔄 Using regex fallback...")
-              # Find all post URLs
               urls = re.findall(r'<loc>(https?://getmodpc\.net/[^<]+)</loc>', content)
               # Filter out non-post URLs
-              urls = [u for u in urls if not u.endswith(('.xml', '.png', '.jpg', '.webp', '.css', '.js'))]
+              urls = [u for u in urls if not u.endswith(('.xml', '.png', '.jpg', '.jpeg', '.webp', '.css', '.js'))]
               # Remove duplicates
               urls = list(dict.fromkeys(urls))
+          
+          # Remove home page URL
+          urls = [u for u in urls if u != 'https://getmodpc.net/']
           
           # Save URLs
           with open('/tmp/sitemap_urls.txt', 'w') as f:
@@ -109,8 +111,11 @@ jobs:
           with open('/tmp/url_count.txt', 'w') as f:
               f.write(str(len(urls)))
           PYSCRIPT
-
+          
           echo "URL_COUNT=$(cat /tmp/url_count.txt)" >> "$GITHUB_OUTPUT"
+          
+          # Show count
+          echo "📊 Total URLs: ${{ steps.sitemap.outputs.URL_COUNT }}"
 
       - name: Restore previous state (download history / processed list)
         run: |
@@ -127,32 +132,24 @@ jobs:
         run: |
           echo "${{ secrets.TWMODS_KEYSTORE_BASE64 }}" | base64 -d > pipeline_work/twmodskey.jks
 
-      - name: Create modified Python script with sitemap file support
-        run: |
-          cat > scripts/publish_apk_modified.py << 'EOF'
-          # [Original script with modifications - see below]
-          EOF
-
       - name: Run pipeline with sitemap file
         env:
           CONFIG_JSON: ${{ secrets.CONFIG_JSON }}
           TWMODS_KEYSTORE_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
           TWMODS_KEY_PASSWORD: ${{ secrets.TWMODS_KEYSTORE_PASSWORD }}
-          SITEMAP_URLS_FILE: /tmp/sitemap_urls.txt
-          URL_COUNT: ${{ steps.sitemap.outputs.URL_COUNT }}
         run: |
-          # Check if we have URLs to process
-          if [ -f "$SITEMAP_URLS_FILE" ]; then
-            URL_COUNT=$(wc -l < "$SITEMAP_URLS_FILE")
+          if [ -f "/tmp/sitemap_urls.txt" ] && [ -s "/tmp/sitemap_urls.txt" ]; then
+            URL_COUNT=$(wc -l < /tmp/sitemap_urls.txt)
             echo "📊 Processing $URL_COUNT URLs from sitemap"
+            echo "📝 First few URLs:"
+            head -3 /tmp/sitemap_urls.txt
             
-            # Pass sitemap file to Python script
             python scripts/publish_apk_modified.py \
-              --sitemap-file "$SITEMAP_URLS_FILE" \
+              --sitemap-file /tmp/sitemap_urls.txt \
               --limit "${{ inputs.limit }}" \
               --account "${{ inputs.account }}"
           else
-            echo "❌ No sitemap URLs file found!"
+            echo "❌ No sitemap URLs found!"
             exit 1
           fi
 
@@ -170,7 +167,7 @@ jobs:
 
       - name: Upload logs/state as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pipeline-state
           path: |
