@@ -59,6 +59,8 @@ KEY_PASSWORD = os.environ.get("TWMODS_KEY_PASSWORD", KEYSTORE_PASSWORD)
 DB_CACHE_FILE = os.path.join(OUTPUT_FOLDER, ".firebase_db_cache.json")
 DOWNLOAD_HISTORY_FILE = os.path.join(INPUT_FOLDER, "download_history.json")
 PROCESSED_DB = os.path.join(OUTPUT_FOLDER, ".processed.json")
+RELEASE_TRACKER_FILE = os.path.join(INPUT_FOLDER, "release_tracker.json")
+MAX_ASSETS_PER_RELEASE = int(os.environ.get("MAX_ASSETS_PER_RELEASE", "50"))
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -180,6 +182,95 @@ def save_processed_db(processed_set):
 def mark_processed(name, processed_set):
     processed_set.add(name)
     save_processed_db(processed_set)
+
+
+# ================= RELEASE ROTATION (auto naya release banao har N assets pe) =================
+
+def load_release_tracker():
+    if os.path.exists(RELEASE_TRACKER_FILE):
+        try:
+            with open(RELEASE_TRACKER_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_release_tracker(tracker):
+    os.makedirs(INPUT_FOLDER, exist_ok=True)
+    with open(RELEASE_TRACKER_FILE, "w") as f:
+        json.dump(tracker, f, indent=2)
+
+
+def get_release_asset_count(repo, token, release_id):
+    """Current release me kitne assets already hain, ye GitHub se check karo."""
+    url = f"https://api.github.com/repos/{repo}/releases/{release_id}"
+    headers = {"Authorization": f"token {token}"}
+    try:
+        res = requests.get(url, headers=headers, timeout=30)
+        if res.status_code == 200:
+            return len(res.json().get("assets", []))
+    except Exception as e:
+        print_warning(f"Could not check release asset count: {e}")
+    return None  # unknown -> caller decide karega
+
+
+def create_new_release(repo, token, tag_name):
+    """Naya release banao usi repo me, agla batch upload karne ke liye."""
+    url = f"https://api.github.com/repos/{repo}/releases"
+    headers = {"Authorization": f"token {token}"}
+    data = {
+        "tag_name": tag_name,
+        "name": tag_name,
+        "body": f"Auto-created by pipeline — batch after {MAX_ASSETS_PER_RELEASE} assets.",
+    }
+    try:
+        res = requests.post(url, headers=headers, json=data, timeout=30)
+        if res.status_code == 201:
+            new_id = str(res.json()["id"])
+            print_success(f"🆕 New release created: {tag_name} (id: {new_id})")
+            return new_id
+        print_error(f"Release creation failed: {res.status_code} - {res.text}")
+    except Exception as e:
+        print_error(f"Release creation exception: {e}")
+    return None
+
+
+def ensure_release_capacity(account_key, cfg, tracker):
+    """
+    Current release me jagah hai ya nahi check karo. Agar MAX_ASSETS_PER_RELEASE
+    (default 50) reach ho gaya to naya release bana ke tracker update kar do.
+    Return: release_id jo abhi use karna hai.
+    """
+    state = tracker.get(account_key)
+    if not state:
+        state = {"release_id": cfg["release_id"], "batch": 1}
+        tracker[account_key] = state
+        save_release_tracker(tracker)
+
+    release_id = state["release_id"]
+    count = get_release_asset_count(cfg["repo"], cfg["token"], release_id)
+
+    if count is None:
+        # Count check fail hua (network/permission issue) — purane release_id pe hi
+        # continue karo, upload apne aap fail ho jayega agar sach me full hai.
+        return release_id
+
+    if count >= MAX_ASSETS_PER_RELEASE:
+        new_batch = state.get("batch", 1) + 1
+        tag_name = f"{cfg.get('release_tag_prefix', cfg['label'].split('/')[-1])}-batch-{new_batch}"
+        new_release_id = create_new_release(cfg["repo"], cfg["token"], tag_name)
+        if new_release_id:
+            state["release_id"] = new_release_id
+            state["batch"] = new_batch
+            tracker[account_key] = state
+            save_release_tracker(tracker)
+            return new_release_id
+        # naya release banane me fail — purane pe hi try karo (upload fail ho sakta hai)
+        print_warning("Naya release nahi ban paya, purane release pe hi try kar raha hoon")
+        return release_id
+
+    return release_id
 
 
 # ================= FIREBASE =================
@@ -364,7 +455,8 @@ def parse_sitemap(sitemap_url):
 
 # ================= DOWNLOAD =================
 
-def extract_apk_links(page_url, debug=False):
+def fetch_apk_download_link(page_url, debug=False):
+    """/?download=links page se sirf APK download link nikalta hai."""
     if not page_url.endswith("/?download=links"):
         page_url = page_url.rstrip("/") + "/?download=links"
     try:
@@ -383,8 +475,33 @@ def extract_apk_links(page_url, debug=False):
             print_warning(f"[DEBUG] #list-downloadlinks element present: {has_container}")
         return urls[0] if urls else None
     except Exception as e:
-        print_error(f"Error extracting links: {e}")
+        print_error(f"Error extracting download link: {e}")
         return None
+
+
+def fetch_playstore_id_from_app_page(app_url, debug=False):
+    """
+    Play Store ID download-links page pe NAHI hoti — asli app page
+    (jaise https://getmodpc.net/appname/) pe hoti hai. Isliye ye
+    alag se, sahi page fetch karta hai.
+    """
+    page_url = app_url.rstrip("/") + "/"
+    try:
+        resp = CF_SCRAPER.get(page_url, headers=HEADERS, timeout=30)
+        pkg = extract_playstore_from_html(resp.text)
+        if debug and not pkg:
+            print_warning(
+                f"[DEBUG] Play Store link nahi mila app page pe "
+                f"| status={resp.status_code} | url={page_url}"
+            )
+        return pkg
+    except Exception as e:
+        print_error(f"Error extracting playstore id: {e}")
+        return None
+
+
+def extract_apk_links(page_url, debug=False):
+    return fetch_apk_download_link(page_url, debug=debug)
 
 
 def download_file(url, filename, download_dir):
@@ -406,27 +523,29 @@ def download_file(url, filename, download_dir):
         return False
 
 
-def getmodpc_download(app_url, download_dir, history):
+def getmodpc_download(app_url, download_dir, history, debug=False):
     print_step("DOWNLOAD", app_url)
     app_name = get_app_name(app_url)
-    apk_url = extract_apk_links(app_url)
+    apk_url = fetch_apk_download_link(app_url, debug=debug)
     if not apk_url:
         print_error("No download link found!")
-        return None, None, None
+        return None, None, None, None
+
+    playstore_id = fetch_playstore_id_from_app_page(app_url, debug=debug)
 
     filename = resolve_filename(apk_url, app_name)
 
     if filename in history.get("downloaded", []):
         filepath = os.path.join(download_dir, filename)
         if os.path.exists(filepath):
-            return filepath, app_name, extract_version_from_filename(filename)
+            return filepath, app_name, extract_version_from_filename(filename), playstore_id
 
     print_info(f"Downloading: {filename}")
     if download_file(apk_url, filename, download_dir):
         mark_downloaded(filename, history)
-        return os.path.join(download_dir, filename), app_name, extract_version_from_filename(filename)
+        return os.path.join(download_dir, filename), app_name, extract_version_from_filename(filename), playstore_id
     mark_download_failed(filename, history)
-    return None, None, None
+    return None, None, None, None
 
 
 # ================= .SO MODIFIER =================
@@ -616,6 +735,7 @@ def extract_playstore_from_html(html_text):
 def fetch_playstore_info(page_url):
     try:
         resp = CF_SCRAPER.get(page_url, headers=HEADERS, timeout=30)
+        html_text = unescape(resp.text)
         pkg = extract_playstore_from_html(html_text)
         if pkg:
             return {"play_url": f"https://play.google.com/store/apps/details?id={pkg}", "package_id": pkg}
@@ -624,39 +744,37 @@ def fetch_playstore_info(page_url):
     return {"play_url": None, "package_id": None}
 
 
+try:
+    from google_play_scraper import app as gp_app
+    GOOGLE_PLAY_SCRAPER_AVAILABLE = True
+except ImportError:
+    GOOGLE_PLAY_SCRAPER_AVAILABLE = False
+
+
 def scrape_playstore(playstore_id):
-    if not playstore_id:
+    """
+    Seedha Google Play se data leta hai (google-play-scraper library).
+    Pehle twmods.in ka API bhi hit karte the, par wo khud isi library ka
+    wrapper hai — bewajah extra network-hop + uske apne downtime/rate-limit
+    ka risk tha. Ab seedha yahi karte hain.
+    """
+    if not GOOGLE_PLAY_SCRAPER_AVAILABLE or not playstore_id:
         return None
-    headers = {"User-Agent": HEADERS["User-Agent"], "Referer": "https://twmods.in/", "Origin": "https://twmods.in"}
-    apis = [f"https://twmods.in/api/playstore?id={playstore_id}", f"https://twmods.in/api/playstore1?id={playstore_id}"]
-    combined = {}
-    for api_url in apis:
+    for country in ("in", "us"):
         try:
-            res = requests.get(api_url, headers=headers, timeout=15)
-            if res.status_code != 200:
-                continue
-            data = res.json()
-            for k, v in data.items():
-                if v and (k not in combined or not combined[k]):
-                    combined[k] = v
+            r = gp_app(playstore_id, lang="en", country=country)
+            return {
+                "name": r.get("title", playstore_id.split(".")[-1].title()),
+                "description": r.get("description", ""),
+                "icon": r.get("icon", ""),
+                "screenshots": (r.get("screenshots") or [])[:6],
+                "rating": float(r.get("score") or 0),
+                "developer": r.get("developer", ""),
+                "version": r.get("version", ""),
+            }
         except Exception:
             continue
-    if not combined:
-        return None
-    screenshots = combined.get("screenshots", [])
-    if isinstance(screenshots, str):
-        screenshots = [s.strip() for s in screenshots.split(",") if s.strip()]
-    elif not isinstance(screenshots, list):
-        screenshots = []
-    return {
-        "name": (combined.get("name") or combined.get("title") or playstore_id.split(".")[-1].title()).strip(),
-        "description": combined.get("description") or combined.get("full_description") or "",
-        "icon": combined.get("icon") or combined.get("image") or "",
-        "screenshots": screenshots[:6],
-        "rating": float(combined.get("rating") or combined.get("score") or 0 or 0),
-        "developer": combined.get("developer") or combined.get("author") or "",
-        "version": combined.get("version") or "",
-    }
+    return None
 
 
 # ================= GITHUB UPLOAD =================
@@ -802,19 +920,15 @@ def publish_to_firebase(download_url, file_size_mb, app_name, version, playstore
 
 def process_single_app(app_url, db_data, history, processed_set, repo, token, release_id, known_package_id=None):
     result = {"url": app_url, "status": "pending"}
-    apk_path, app_name, version = getmodpc_download(app_url, INPUT_FOLDER, history)
+    apk_path, app_name, version, extracted_playstore_id = getmodpc_download(app_url, INPUT_FOLDER, history)
     if not apk_path:
         result["status"] = "download_failed"
         return result
 
-    playstore_id = known_package_id
+    playstore_id = known_package_id or extracted_playstore_id
     if not playstore_id:
-        try:
-            page_url = app_url.rstrip("/") + "/?download=links"
-            resp = CF_SCRAPER.get(page_url, headers=HEADERS, timeout=30)
-            playstore_id = extract_playstore_from_html(resp.text)
-        except Exception:
-            pass
+        # Fallback: pehli try me kisi wajah se nahi mila, ek aur try (same main page)
+        playstore_id = fetch_playstore_id_from_app_page(app_url)
 
     ps_data = scrape_playstore(playstore_id) if playstore_id else None
     if ps_data:
@@ -928,10 +1042,13 @@ def run_pipeline_from_sitemap_xml(xml_file, limit, account_key):
 
     print_success(f"Ready: {len(download_jobs)} app(s)")
 
+    release_tracker = load_release_tracker()
+
     success_count, fail_count = 0, 0
     for i, job in enumerate(download_jobs, start=1):
         print(f"\n{'#'*60}\n[{i}/{len(download_jobs)}] {job['url']}\n{'#'*60}")
-        result = process_single_app(job["url"], db_data, history, processed_set, repo, token, release_id)
+        active_release_id = ensure_release_capacity(account_key, cfg, release_tracker)
+        result = process_single_app(job["url"], db_data, history, processed_set, repo, token, active_release_id)
         if result["status"] == "success":
             success_count += 1
             print_success(f"DONE: {job['filename']}")
@@ -995,10 +1112,13 @@ def run_pipeline(sitemap_url, limit, account_key):
 
     print_success(f"Ready: {len(download_jobs)} app(s)")
 
+    release_tracker = load_release_tracker()
+
     success_count, fail_count = 0, 0
     for i, job in enumerate(download_jobs, start=1):
         print(f"\n{'#'*60}\n[{i}/{len(download_jobs)}] {job['url']}\n{'#'*60}")
-        result = process_single_app(job["url"], db_data, history, processed_set, repo, token, release_id)
+        active_release_id = ensure_release_capacity(account_key, cfg, release_tracker)
+        result = process_single_app(job["url"], db_data, history, processed_set, repo, token, active_release_id)
         if result["status"] == "success":
             success_count += 1
             print_success(f"DONE: {job['filename']}")
