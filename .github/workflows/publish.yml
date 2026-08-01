@@ -61,6 +61,7 @@ jobs:
           mkdir -p pipeline_work/getmodfiles pipeline_work/published
           [ -f state/download_history.json ] && cp state/download_history.json pipeline_work/getmodfiles/download_history.json || echo "{}" > pipeline_work/getmodfiles/download_history.json
           [ -f state/processed.json ] && cp state/processed.json pipeline_work/published/.processed.json || echo "[]" > pipeline_work/published/.processed.json
+          [ -f state/release_tracker.json ] && cp state/release_tracker.json pipeline_work/getmodfiles/release_tracker.json || echo "{}" > pipeline_work/getmodfiles/release_tracker.json
 
       - name: Write Firebase service account
         run: |
@@ -95,6 +96,7 @@ jobs:
           mkdir -p state
           cp pipeline_work/getmodfiles/download_history.json state/download_history.json 2>/dev/null || true
           cp pipeline_work/published/.processed.json state/processed.json 2>/dev/null || true
+          cp pipeline_work/getmodfiles/release_tracker.json state/release_tracker.json 2>/dev/null || true
           git config --global user.name "telepost-bot"
           git config --global user.email "actions@github.com"
           git add state/
@@ -109,3 +111,4 @@ jobs:
           path: |
             pipeline_work/getmodfiles/download_history.json
             pipeline_work/published/.processed.json
+=
