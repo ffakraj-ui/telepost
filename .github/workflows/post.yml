@@ -31,9 +31,9 @@ on:
         type: boolean
         default: false
 
-  # Automatic: har 30 minute me naye releases check karo
+  # Automatic: har 24 hours me naye releases check karo
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "0 3 * * *"
 
 permissions:
   contents: write
@@ -65,7 +65,7 @@ jobs:
           if [ -n "${{ inputs.release_tag }}" ]; then ARGS="$ARGS --release-tag ${{ inputs.release_tag }}"; fi
           if [ -n "${{ inputs.asset_name }}" ]; then ARGS="$ARGS --asset-name \"${{ inputs.asset_name }}\""; fi
           LIMIT="${{ inputs.limit }}"
-          if [ -z "$LIMIT" ]; then LIMIT="10"; fi
+          if [ -z "$LIMIT" ]; then LIMIT="20"; fi
           ARGS="$ARGS --limit $LIMIT"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           eval python scripts/post_apk.py $ARGS
